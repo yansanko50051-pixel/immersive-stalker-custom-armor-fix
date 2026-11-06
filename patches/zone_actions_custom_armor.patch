@@ -1,0 +1,108 @@
+--- a/gamedata/scripts/zone_actions.script
++++ b/gamedata/scripts/zone_actions.script
+@@ -1,4 +1,4 @@
+--- Immersive Stalker (IS) 0.1.114 beta. No base scripts are overwritten.
++-- Immersive Stalker (IS) 0.1.114 beta + custom visual motion compatibility patch. No base scripts are overwritten.
+ GUI = nil
+ local scene = nil
+ local quick_exit = nil
+@@ -1111,6 +1111,10 @@
+     return lengths
+ end
+ 
++-- Auto-detect custom actor visuals instead of limiting playability to GFY's
++-- static visual->motion-set catalogue. This does not synthesize missing motions.
++local motion_probe={visual=nil, checked={}}
++
+ local function model_motions()
+     compatibility = compatibility or zone_actions_compat.get()
+     local visual = visual_name()
+@@ -1118,24 +1122,68 @@
+     return index and compatibility.sets[index], visual
+ end
+ 
++-- nil = native probe unavailable; true/false = verified engine result.
++-- This function is never called from the per-frame update path: only when a
++-- player starts an action (or from the existing idle restore check).
++local function native_motion_available(visual,name)
++    if not game or type(game.motion_exists) ~= "function" then return nil end
++    if motion_probe.visual ~= visual then
++        motion_probe.visual=visual
++        motion_probe.checked={}
++    end
++    local previous=motion_probe.checked[name]
++    if previous ~= nil then return previous end
++    local model=visual..".ogf"
++    if not getFS():exist("$game_meshes$",model) then
++        motion_probe.checked[name]=false
++        return false
++    end
++    local ok,exists=pcall(game.motion_exists,model,name)
++    if not ok then
++        -- An exception from a native query must not become permission to play
++        -- an unknown motion. Treat as unsupported rather than risking a crash.
++        log("Motion probe error: "..visual.." / "..name..": "..tostring(exists))
++        motion_probe.checked[name]=false
++        return false
++    end
++    local result=not not exists
++    motion_probe.checked[name]=result
++    return result
++end
++
+ local function motion_duration(name,uncached)
+     local available, visual = model_motions()
+-    -- Keep successful checks only for this validated action and this model.
+-    -- A new action still checks the active native model before touching it.
+     if not uncached and scene and scene.visual==visual and scene.motion_lengths then
+         local duration=scene.motion_lengths[name]
+         if duration then return duration end
+     end
+-    if not available or not available[name] then
+-        return nil, visual .. ": " .. name
+-    end
+-    if game.motion_exists then
+-        local model = visual .. ".ogf"
+-        if not getFS():exist("$game_meshes$", model) or not game.motion_exists(model, name) then
+-            return nil, visual .. ": " .. name
+-        end
+-    end
+-    return motion_files.get(visual)[name] or available[name]
++
++    -- Native checks take precedence over a stale catalogue entry. The old
++    -- implementation rejected any unknown custom armor visual *before* this
++    -- test was reached, even if the animation existed in its loaded OMF.
++    local native=native_motion_available(visual,name)
++    if native==false then return nil,visual..": "..name end
++
++    -- When available, use timing parsed from the actually selected OGF/OMF.
++    -- Parsing is cached once per visual, including negative results.
++    local parsed=motion_files.get(visual)[name]
++    if type(parsed)=="number" and parsed>0 and parsed<600 then
++        return parsed
++    end
++
++    if native==true then
++        -- Packed OMFs are often not readable by io.open, even when the engine
++        -- can play the motion. Nominal base durations affect only scheduling;
++        -- they must never be used as proof that an animation exists.
++        local duration=(available and available[name]) or load_data().durations[name]
++        if type(duration)=="number" and duration>0 then return duration end
++    elseif available and available[name] then
++        -- Engines without game.motion_exists retain the legacy catalogue
++        -- behavior. An unknown model requires independently parsed motion
++        -- metadata (handled above), otherwise it remains safely blocked.
++        return available[name]
++    end
++    return nil,visual..": "..name
+ end
+ 
+ local function validate_action(action)
+@@ -2638,6 +2686,7 @@
+     speech_faction=nil
+     speech_profile=nil
+     visual_cache_name=nil;visual_cache_value=nil
++    motion_probe.visual=nil;motion_probe.checked={}
+     if zone_actions_folklore then zone_actions_folklore.reset() end
+     reaction_combat_at=0;reaction_combat_value=false
+     if zone_actions_reactions then zone_actions_reactions.reset() end
